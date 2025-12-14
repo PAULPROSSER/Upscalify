@@ -128,5 +128,7 @@ with gr.Blocks(css=wati_css, theme=gr.themes.Base()) as demo:
                 btn_vid.click(process_video, inputs=[vid_input, model_sel_vid], outputs=out_vid)
 
 # --- CRITICAL FIX: Enable Queue for Progress Bars & Long Tasks ---
-demo.queue() 
-demo.launch(server_name="0.0.0.0", server_port=7860, show_error=True)
+if __name__ == "__main__":
+    demo.queue()
+    # We remove explicit arguments because we set them in Dockerfile ENV
+    demo.launch(show_error=True)
