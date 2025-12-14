@@ -5,11 +5,20 @@ import subprocess
 import time
 
 # --- 1. CONFIGURATION ---
-# We use absolute path to match the Dockerfile location
 UPSCALER_BIN = "/app/executable" 
 TEMP_BASE = "/app/temp_data"
 
-# Ensure temp directories exist at startup
+# =======================================================
+# 🚨 CRITICAL FIX: FORCE CPU MODE (Do not remove this)
+# =======================================================
+# This tells the RealESRGAN engine to use the "software renderer"
+# instead of searching for an NVIDIA GPU (which causes error -9).
+os.environ["VK_ICD_FILENAMES"] = "/usr/share/vulkan/icd.d/lvp_icd.x86_64.json"
+os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
+os.environ["OMP_NUM_THREADS"] = "4" 
+# =======================================================
+
+# Ensure temp directories exist
 os.makedirs(TEMP_BASE, exist_ok=True)
 
 # --- 2. WATI DESIGN SYSTEM CSS ---
@@ -74,7 +83,6 @@ def clean_path(path):
 
 # --- 4. IMAGE LOGIC ---
 def process_images(files, model_name):
-    # Error Handling Block
     try:
         if not files: return None
         
@@ -84,22 +92,20 @@ def process_images(files, model_name):
         clean_path(upload_dir)
         clean_path(output_dir)
 
-        # Handle Files (Gradio 4 passes paths as strings now)
+        # Handle Files
         for file_path in files:
             filename = os.path.basename(file_path)
             shutil.copy(file_path, os.path.join(upload_dir, filename))
         
-        # CPU Environment Variables (Crucial for Netcup)
-        env = os.environ.copy()
-        env["VK_ICD_FILENAMES"] = "/usr/share/vulkan/icd.d/lvp_icd.x86_64.json"
-        
         # 24-Core Parallel Command
         cmd = f"find {upload_dir} -type f | parallel -j 6 '{UPSCALER_BIN} -i {{}} -o {output_dir}/{{/.}}.png -n {model_name}'"
         
-        # Run process
-        result = subprocess.run(cmd, shell=True, env=env, capture_output=True, text=True)
+        # Run process with captured output for debugging
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        
         if result.returncode != 0:
-            raise Exception(f"Upscaling failed: {result.stderr}")
+            # If it fails, this message will now show in the UI red box
+            raise Exception(f"Engine Error: {result.stderr}")
         
         # Zip Results
         zip_path = f"{TEMP_BASE}/{job_id}/results"
@@ -107,7 +113,7 @@ def process_images(files, model_name):
         return f"{zip_path}.zip"
     
     except Exception as e:
-        raise gr.Error(f"Error processing images: {str(e)}")
+        raise gr.Error(f"Processing Failed: {str(e)}")
 
 # --- 5. VIDEO LOGIC ---
 def process_video(video_file, model_name):
@@ -123,15 +129,12 @@ def process_video(video_file, model_name):
         
         output_video = f"{work_dir}/upscaled_video.mp4"
         
-        env = os.environ.copy()
-        env["VK_ICD_FILENAMES"] = "/usr/share/vulkan/icd.d/lvp_icd.x86_64.json"
-
         # 1. Extract Frames
         subprocess.run(f"ffmpeg -i {video_file} -q:v 2 {frames_in}/frame_%08d.jpg", shell=True, check=True)
         
         # 2. Upscale (Parallel)
         upscale_cmd = f"find {frames_in} -name '*.jpg' | parallel -j 6 '{UPSCALER_BIN} -i {{}} -o {frames_out}/{{/.}}.png -n {model_name}'"
-        subprocess.run(upscale_cmd, shell=True, env=env, check=True)
+        subprocess.run(upscale_cmd, shell=True, check=True)
         
         # 3. Get Framerate
         fps_cmd = f"ffprobe -v 0 -of csv=p=0 -select_streams v:0 -show_entries stream=r_frame_rate {video_file}"
@@ -150,7 +153,6 @@ def process_video(video_file, model_name):
         raise gr.Error(f"Video Error: {str(e)}")
 
 # --- 6. UI LAYOUT ---
-# We pass theme/css here to avoid warnings
 with gr.Blocks(theme=gr.themes.Base(), css=wati_css) as demo:
     
     with gr.Column(elem_classes="gradio-container"):
@@ -162,7 +164,6 @@ with gr.Blocks(theme=gr.themes.Base(), css=wati_css) as demo:
         with gr.TabItem("🖼️ Image Batch"):
             with gr.Column(elem_classes="group-container"):
                 gr.Markdown("### Upload Images")
-                # CRITICAL FIX: type="filepath" ensures we get string paths, not objects
                 img_input = gr.File(
                     file_count="multiple", 
                     label="Upload Images", 
@@ -183,7 +184,6 @@ with gr.Blocks(theme=gr.themes.Base(), css=wati_css) as demo:
         with gr.TabItem("🎥 Video Upscaler"):
             with gr.Column(elem_classes="group-container"):
                 gr.Markdown("### Upload Video (MP4)")
-                # CRITICAL FIX: type="filepath"
                 vid_input = gr.Video(
                     label="Upload Video", 
                     format="mp4"
@@ -201,10 +201,7 @@ with gr.Blocks(theme=gr.themes.Base(), css=wati_css) as demo:
 
 # --- 7. LAUNCH ---
 if __name__ == "__main__":
-    # Queue is essential for heavy tasks to avoid timeouts
     demo.queue()
-    # We use 0.0.0.0 to bind to all interfaces for Docker
-    # We allow all paths in /app/temp_data so downloading the zip works
     demo.launch(
         server_name="0.0.0.0", 
         server_port=7860, 
