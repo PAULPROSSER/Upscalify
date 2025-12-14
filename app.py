@@ -9,24 +9,23 @@ import glob
 UPSCALER_BIN = "/app/executable" 
 TEMP_BASE = "/app/temp_data"
 
-# --- 2. DRIVER & CPU CONFIGURATION ---
+# --- 2. DRIVER SETUP (The Anti-Crash Logic) ---
 def setup_cpu_environment():
-    """
-    Forces the application to use Software Rendering (CPU) and
-    sets the correct flags to avoid 'vkCreateInstance failed'.
-    """
-    # 1. Force CPU Threads
-    os.environ["OMP_NUM_THREADS"] = "8" # Use 8 threads for NCNN
+    # 1. Force CPU Threads (Use 8 threads to prevent bottlenecking)
+    os.environ["OMP_NUM_THREADS"] = "8" 
     
     # 2. Locate Software Driver (Linux's version of SwiftShader)
-    # This is a backup in case the Dockerfile ENV failed
+    # We find the file automatically so it works on any Linux version
     potential_drivers = glob.glob("/usr/share/vulkan/icd.d/*lvp*.json")
     if potential_drivers:
         os.environ["VK_ICD_FILENAMES"] = potential_drivers[0]
-        print(f"✅ Software Driver Found: {potential_drivers[0]}")
-    
+        print(f"✅ CPU Driver Found: {potential_drivers[0]}")
+    else:
+        print("⚠️ Warning: Could not auto-detect Vulkan driver. Upscaling might fail.")
+
     os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
 
+# Run setup immediately
 setup_cpu_environment()
 os.makedirs(TEMP_BASE, exist_ok=True)
 
@@ -57,12 +56,12 @@ def process_images(files, model_name):
         clean_path(upload_dir)
         clean_path(output_dir)
 
+        # Handle file paths (Gradio 4)
         for file_path in files:
             filename = os.path.basename(file_path)
             shutil.copy(file_path, os.path.join(upload_dir, filename))
         
-        # COMMAND UPDATE: Added "-g -1" to force CPU mode
-        # This matches the user request to "force CPU usage"
+        # CRITICAL FIX: Added "-g -1" to force CPU mode
         cmd = f"find {upload_dir} -type f | parallel -j 4 '{UPSCALER_BIN} -i {{}} -o {output_dir}/{{/.}}.png -n {model_name} -g -1'"
         
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
@@ -87,7 +86,7 @@ def process_video(video_file, model_name):
         clean_path(frames_out)
         output_video = f"{work_dir}/upscaled.mp4"
         
-        # 1. Extract
+        # 1. Extract Frames
         subprocess.run(f"ffmpeg -i {video_file} -q:v 2 {frames_in}/frame_%08d.jpg", shell=True, check=True)
         
         # 2. Upscale (Added -g -1 for CPU)
@@ -112,6 +111,7 @@ with gr.Blocks(theme=gr.themes.Base(), css=wati_css) as demo:
     with gr.Column(elem_classes="gradio-container"):
         gr.Markdown("# 🚀 Media Enhancement Studio")
         gr.Markdown("High-performance CPU Upscaling (Netcup 8000 G12)")
+    
     with gr.Tabs():
         with gr.TabItem("🖼️ Image Batch"):
             with gr.Column(elem_classes="group-container"):
@@ -120,6 +120,7 @@ with gr.Blocks(theme=gr.themes.Base(), css=wati_css) as demo:
                 btn_img = gr.Button("Upscale Images", variant="primary")
                 out_zip = gr.File(label="Download Results")
                 btn_img.click(process_images, inputs=[img_input, model_sel], outputs=out_zip)
+        
         with gr.TabItem("🎥 Video Upscaler"):
             with gr.Column(elem_classes="group-container"):
                 vid_input = gr.Video(label="Upload Video", format="mp4")
