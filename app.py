@@ -3,208 +3,131 @@ import os
 import shutil
 import subprocess
 import time
+import glob
 
 # --- 1. CONFIGURATION ---
 UPSCALER_BIN = "/app/executable" 
 TEMP_BASE = "/app/temp_data"
 
-# =======================================================
-# 🚨 CRITICAL FIX: FORCE CPU MODE (Do not remove this)
-# =======================================================
-# This tells the RealESRGAN engine to use the "software renderer"
-# instead of searching for an NVIDIA GPU (which causes error -9).
-os.environ["VK_ICD_FILENAMES"] = "/usr/share/vulkan/icd.d/lvp_icd.x86_64.json"
-os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
-os.environ["OMP_NUM_THREADS"] = "4" 
-# =======================================================
+# --- 2. DRIVER & CPU CONFIGURATION ---
+def setup_cpu_environment():
+    """
+    Forces the application to use Software Rendering (CPU) and
+    sets the correct flags to avoid 'vkCreateInstance failed'.
+    """
+    # 1. Force CPU Threads
+    os.environ["OMP_NUM_THREADS"] = "8" # Use 8 threads for NCNN
+    
+    # 2. Locate Software Driver (Linux's version of SwiftShader)
+    # This is a backup in case the Dockerfile ENV failed
+    potential_drivers = glob.glob("/usr/share/vulkan/icd.d/*lvp*.json")
+    if potential_drivers:
+        os.environ["VK_ICD_FILENAMES"] = potential_drivers[0]
+        print(f"✅ Software Driver Found: {potential_drivers[0]}")
+    
+    os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
 
-# Ensure temp directories exist
+setup_cpu_environment()
 os.makedirs(TEMP_BASE, exist_ok=True)
 
-# --- 2. WATI DESIGN SYSTEM CSS ---
+# --- 3. WATI DESIGN SYSTEM CSS ---
 wati_css = """
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
-:root { 
-    --primary-main: #1BD760; 
-    --primary-dark: #0C9A3F; 
-    --primary-light: #D9F7E8; 
-    --ink-900: #111827; 
-    --radius-lg: 16px; 
-    --radius-pill: 999px; 
-}
-body, .gradio-container { 
-    font-family: 'Inter', sans-serif !important; 
-    background-color: #FFFFFF; 
-    color: var(--ink-900); 
-}
-.gradio-container { 
-    max-width: 1120px !important; 
-    margin: 0 auto; 
-    padding-top: 40px; 
-}
-h1 { 
-    font-weight: 800 !important; 
-    font-size: 40px !important; 
-    margin-bottom: 8px !important;
-}
-.subtitle {
-    font-size: 18px;
-    color: #4B5563;
-    margin-bottom: 32px;
-}
-.group-container { 
-    background: #FFFFFF; 
-    border: 1px solid rgba(15, 23, 42, 0.04); 
-    border-radius: var(--radius-lg); 
-    box-shadow: 0 18px 45px rgba(15, 23, 42, 0.08); 
-    padding: 32px; 
-    margin-bottom: 24px; 
-}
-button.primary { 
-    background: var(--primary-main) !important; 
-    color: white !important; 
-    font-weight: 600 !important; 
-    border-radius: var(--radius-pill) !important; 
-    padding: 12px 32px !important; 
-    border: none !important; 
-    transition: all 0.2s;
-}
-button.primary:hover { 
-    background: var(--primary-dark) !important; 
-    transform: translateY(-1px);
-}
+:root { --primary-main: #1BD760; --primary-dark: #0C9A3F; --primary-light: #D9F7E8; --ink-900: #111827; --radius-lg: 16px; --radius-pill: 999px; }
+body, .gradio-container { font-family: 'Inter', sans-serif !important; background-color: #FFFFFF; color: var(--ink-900); }
+.gradio-container { max-width: 1120px !important; margin: 0 auto; padding-top: 40px; }
+h1 { font-weight: 800 !important; font-size: 40px !important; margin-bottom: 8px !important; }
+.group-container { background: #FFFFFF; border: 1px solid rgba(15, 23, 42, 0.04); border-radius: var(--radius-lg); box-shadow: 0 18px 45px rgba(15, 23, 42, 0.08); padding: 32px; margin-bottom: 24px; }
+button.primary { background: var(--primary-main) !important; color: white !important; font-weight: 600 !important; border-radius: var(--radius-pill) !important; padding: 12px 32px !important; border: none !important; transition: all 0.2s; }
+button.primary:hover { background: var(--primary-dark) !important; transform: translateY(-1px); }
 """
 
-# --- 3. HELPER FUNCTIONS ---
+# --- 4. HELPER FUNCTIONS ---
 def clean_path(path):
-    if os.path.exists(path): 
-        shutil.rmtree(path)
+    if os.path.exists(path): shutil.rmtree(path)
     os.makedirs(path, exist_ok=True)
 
-# --- 4. IMAGE LOGIC ---
+# --- 5. IMAGE LOGIC ---
 def process_images(files, model_name):
     try:
         if not files: return None
-        
         job_id = str(int(time.time()))
         upload_dir = f"{TEMP_BASE}/{job_id}/in"
         output_dir = f"{TEMP_BASE}/{job_id}/out"
         clean_path(upload_dir)
         clean_path(output_dir)
 
-        # Handle Files
         for file_path in files:
             filename = os.path.basename(file_path)
             shutil.copy(file_path, os.path.join(upload_dir, filename))
         
-        # 24-Core Parallel Command
-        cmd = f"find {upload_dir} -type f | parallel -j 6 '{UPSCALER_BIN} -i {{}} -o {output_dir}/{{/.}}.png -n {model_name}'"
+        # COMMAND UPDATE: Added "-g -1" to force CPU mode
+        # This matches the user request to "force CPU usage"
+        cmd = f"find {upload_dir} -type f | parallel -j 4 '{UPSCALER_BIN} -i {{}} -o {output_dir}/{{/.}}.png -n {model_name} -g -1'"
         
-        # Run process with captured output for debugging
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-        
         if result.returncode != 0:
-            # If it fails, this message will now show in the UI red box
-            raise Exception(f"Engine Error: {result.stderr}")
-        
-        # Zip Results
+            raise Exception(f"Engine Log: {result.stderr}")
+            
         zip_path = f"{TEMP_BASE}/{job_id}/results"
         shutil.make_archive(zip_path, 'zip', output_dir)
         return f"{zip_path}.zip"
-    
     except Exception as e:
-        raise gr.Error(f"Processing Failed: {str(e)}")
+        raise gr.Error(f"Upscale Error: {str(e)}")
 
-# --- 5. VIDEO LOGIC ---
+# --- 6. VIDEO LOGIC ---
 def process_video(video_file, model_name):
     try:
         if not video_file: return None
-        
         job_id = str(int(time.time()))
         work_dir = f"{TEMP_BASE}/{job_id}"
         frames_in = f"{work_dir}/frames_in"
         frames_out = f"{work_dir}/frames_out"
         clean_path(frames_in)
         clean_path(frames_out)
+        output_video = f"{work_dir}/upscaled.mp4"
         
-        output_video = f"{work_dir}/upscaled_video.mp4"
-        
-        # 1. Extract Frames
+        # 1. Extract
         subprocess.run(f"ffmpeg -i {video_file} -q:v 2 {frames_in}/frame_%08d.jpg", shell=True, check=True)
         
-        # 2. Upscale (Parallel)
-        upscale_cmd = f"find {frames_in} -name '*.jpg' | parallel -j 6 '{UPSCALER_BIN} -i {{}} -o {frames_out}/{{/.}}.png -n {model_name}'"
+        # 2. Upscale (Added -g -1 for CPU)
+        upscale_cmd = f"find {frames_in} -name '*.jpg' | parallel -j 4 '{UPSCALER_BIN} -i {{}} -o {frames_out}/{{/.}}.png -n {model_name} -g -1'"
         subprocess.run(upscale_cmd, shell=True, check=True)
         
-        # 3. Get Framerate
+        # 3. Stitch
         fps_cmd = f"ffprobe -v 0 -of csv=p=0 -select_streams v:0 -show_entries stream=r_frame_rate {video_file}"
         try:
             fps_raw = subprocess.check_output(fps_cmd, shell=True).decode().strip().split('/')
             fps = float(fps_raw[0]) / float(fps_raw[1]) if len(fps_raw) == 2 else 30
-        except:
-            fps = 30
+        except: fps = 30
             
-        # 4. Stitch Video
-        stitch_cmd = f"ffmpeg -framerate {fps} -i {frames_out}/frame_%08d.png -i {video_file} -map 0:v -map 1:a -c:v libx264 -pix_fmt yuv420p -crf 23 -preset medium {output_video}"
-        subprocess.run(stitch_cmd, shell=True, check=True)
+        subprocess.run(f"ffmpeg -framerate {fps} -i {frames_out}/frame_%08d.png -i {video_file} -map 0:v -map 1:a -c:v libx264 -pix_fmt yuv420p -crf 23 -preset medium {output_video}", shell=True, check=True)
         
         return output_video
     except Exception as e:
         raise gr.Error(f"Video Error: {str(e)}")
 
-# --- 6. UI LAYOUT ---
+# --- 7. UI ---
 with gr.Blocks(theme=gr.themes.Base(), css=wati_css) as demo:
-    
     with gr.Column(elem_classes="gradio-container"):
         gr.Markdown("# 🚀 Media Enhancement Studio")
-        gr.Markdown('<div class="subtitle">High-performance 24-core upscaling engine.</div>')
-        
+        gr.Markdown("High-performance CPU Upscaling (Netcup 8000 G12)")
     with gr.Tabs():
-        # --- TAB 1: IMAGES ---
         with gr.TabItem("🖼️ Image Batch"):
             with gr.Column(elem_classes="group-container"):
-                gr.Markdown("### Upload Images")
-                img_input = gr.File(
-                    file_count="multiple", 
-                    label="Upload Images", 
-                    type="filepath",
-                    height=150
-                )
-                model_sel = gr.Dropdown(
-                    ["realesrgan-x4plus", "realesrgan-x4plus-anime"], 
-                    value="realesrgan-x4plus", 
-                    label="Model"
-                )
+                img_input = gr.File(file_count="multiple", label="Upload Images", type="filepath", height=150)
+                model_sel = gr.Dropdown(["realesrgan-x4plus", "realesrgan-x4plus-anime"], value="realesrgan-x4plus", label="Model")
                 btn_img = gr.Button("Upscale Images", variant="primary")
                 out_zip = gr.File(label="Download Results")
-                
                 btn_img.click(process_images, inputs=[img_input, model_sel], outputs=out_zip)
-
-        # --- TAB 2: VIDEO ---
         with gr.TabItem("🎥 Video Upscaler"):
             with gr.Column(elem_classes="group-container"):
-                gr.Markdown("### Upload Video (MP4)")
-                vid_input = gr.Video(
-                    label="Upload Video", 
-                    format="mp4"
-                )
-                model_sel_vid = gr.Dropdown(
-                    ["realesrgan-x4plus", "realesrgan-x4plus-anime"], 
-                    value="realesrgan-x4plus", 
-                    label="Model"
-                )
-                
+                vid_input = gr.Video(label="Upload Video", format="mp4")
+                model_sel_vid = gr.Dropdown(["realesrgan-x4plus", "realesrgan-x4plus-anime"], value="realesrgan-x4plus", label="Model")
                 btn_vid = gr.Button("Start Video Upscale", variant="primary")
                 out_vid = gr.Video(label="Download Result")
-                
                 btn_vid.click(process_video, inputs=[vid_input, model_sel_vid], outputs=out_vid)
 
-# --- 7. LAUNCH ---
 if __name__ == "__main__":
     demo.queue()
-    demo.launch(
-        server_name="0.0.0.0", 
-        server_port=7860, 
-        allowed_paths=["/app/temp_data"],
-        show_error=True
-    )
+    demo.launch(server_name="0.0.0.0", server_port=7860, allowed_paths=["/app/temp_data"], show_error=True)
