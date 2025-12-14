@@ -9,27 +9,25 @@ import glob
 UPSCALER_BIN = "/app/executable" 
 TEMP_BASE = "/app/temp_data"
 
-# --- 2. DRIVER SETUP (The Anti-Crash Logic) ---
-def setup_cpu_environment():
-    # 1. Force CPU Threads (Use 8 threads to prevent bottlenecking)
-    os.environ["OMP_NUM_THREADS"] = "8" 
-    
-    # 2. Locate Software Driver (Linux's version of SwiftShader)
-    # We find the file automatically so it works on any Linux version
-    potential_drivers = glob.glob("/usr/share/vulkan/icd.d/*lvp*.json")
-    if potential_drivers:
-        os.environ["VK_ICD_FILENAMES"] = potential_drivers[0]
-        print(f"✅ CPU Driver Found: {potential_drivers[0]}")
-    else:
-        print("⚠️ Warning: Could not auto-detect Vulkan driver. Upscaling might fail.")
-
+# --- 2. STARTUP CHECKS ---
+def configure_environment():
+    # Force 8 threads for NCNN (Optimal for CPU scaling)
+    os.environ["OMP_NUM_THREADS"] = "8"
+    # Ensure the system uses the software renderer
     os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
+    
+    # Auto-detect driver path just in case
+    drivers = glob.glob("/usr/share/vulkan/icd.d/*lvp*.json")
+    if drivers:
+        os.environ["VK_ICD_FILENAMES"] = drivers[0]
+        print(f"🚀 Driver Activated: {drivers[0]}")
+    else:
+        print("⚠️ Warning: No LLVM software driver found. Upscaling may crash.")
 
-# Run setup immediately
-setup_cpu_environment()
+configure_environment()
 os.makedirs(TEMP_BASE, exist_ok=True)
 
-# --- 3. WATI DESIGN SYSTEM CSS ---
+# --- 3. CSS STYLING ---
 wati_css = """
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
 :root { --primary-main: #1BD760; --primary-dark: #0C9A3F; --primary-light: #D9F7E8; --ink-900: #111827; --radius-lg: 16px; --radius-pill: 999px; }
@@ -41,12 +39,12 @@ button.primary { background: var(--primary-main) !important; color: white !impor
 button.primary:hover { background: var(--primary-dark) !important; transform: translateY(-1px); }
 """
 
-# --- 4. HELPER FUNCTIONS ---
+# --- 4. CLEANUP ---
 def clean_path(path):
     if os.path.exists(path): shutil.rmtree(path)
     os.makedirs(path, exist_ok=True)
 
-# --- 5. IMAGE LOGIC ---
+# --- 5. IMAGE PROCESSING ---
 def process_images(files, model_name):
     try:
         if not files: return None
@@ -56,13 +54,12 @@ def process_images(files, model_name):
         clean_path(upload_dir)
         clean_path(output_dir)
 
-        # Handle file paths (Gradio 4)
         for file_path in files:
             filename = os.path.basename(file_path)
             shutil.copy(file_path, os.path.join(upload_dir, filename))
         
-        # CRITICAL FIX: Added "-g -1" to force CPU mode
-        cmd = f"find {upload_dir} -type f | parallel -j 4 '{UPSCALER_BIN} -i {{}} -o {output_dir}/{{/.}}.png -n {model_name} -g -1'"
+        # NOTE: Removed "-g -1" so it uses the software driver (Device 0)
+        cmd = f"find {upload_dir} -type f | parallel -j 4 '{UPSCALER_BIN} -i {{}} -o {output_dir}/{{/.}}.png -n {model_name}'"
         
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         if result.returncode != 0:
@@ -72,9 +69,9 @@ def process_images(files, model_name):
         shutil.make_archive(zip_path, 'zip', output_dir)
         return f"{zip_path}.zip"
     except Exception as e:
-        raise gr.Error(f"Upscale Error: {str(e)}")
+        raise gr.Error(f"Error: {str(e)}")
 
-# --- 6. VIDEO LOGIC ---
+# --- 6. VIDEO PROCESSING ---
 def process_video(video_file, model_name):
     try:
         if not video_file: return None
@@ -86,11 +83,11 @@ def process_video(video_file, model_name):
         clean_path(frames_out)
         output_video = f"{work_dir}/upscaled.mp4"
         
-        # 1. Extract Frames
+        # 1. Extract
         subprocess.run(f"ffmpeg -i {video_file} -q:v 2 {frames_in}/frame_%08d.jpg", shell=True, check=True)
         
-        # 2. Upscale (Added -g -1 for CPU)
-        upscale_cmd = f"find {frames_in} -name '*.jpg' | parallel -j 4 '{UPSCALER_BIN} -i {{}} -o {frames_out}/{{/.}}.png -n {model_name} -g -1'"
+        # 2. Upscale (Parallel)
+        upscale_cmd = f"find {frames_in} -name '*.jpg' | parallel -j 4 '{UPSCALER_BIN} -i {{}} -o {frames_out}/{{/.}}.png -n {model_name}'"
         subprocess.run(upscale_cmd, shell=True, check=True)
         
         # 3. Stitch
@@ -106,12 +103,11 @@ def process_video(video_file, model_name):
     except Exception as e:
         raise gr.Error(f"Video Error: {str(e)}")
 
-# --- 7. UI ---
+# --- 7. UI LAUNCH ---
 with gr.Blocks(theme=gr.themes.Base(), css=wati_css) as demo:
     with gr.Column(elem_classes="gradio-container"):
         gr.Markdown("# 🚀 Media Enhancement Studio")
-        gr.Markdown("High-performance CPU Upscaling (Netcup 8000 G12)")
-    
+        gr.Markdown("Powered by Debian 12 & LLVM 15+")
     with gr.Tabs():
         with gr.TabItem("🖼️ Image Batch"):
             with gr.Column(elem_classes="group-container"):
@@ -120,7 +116,6 @@ with gr.Blocks(theme=gr.themes.Base(), css=wati_css) as demo:
                 btn_img = gr.Button("Upscale Images", variant="primary")
                 out_zip = gr.File(label="Download Results")
                 btn_img.click(process_images, inputs=[img_input, model_sel], outputs=out_zip)
-        
         with gr.TabItem("🎥 Video Upscaler"):
             with gr.Column(elem_classes="group-container"):
                 vid_input = gr.Video(label="Upload Video", format="mp4")
